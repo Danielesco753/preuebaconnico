@@ -8,12 +8,26 @@
   const $$ = (sel, ctx = document) => Array.from(ctx.querySelectorAll(sel));
 
   /* ============================================================
-     MAZE · Etiquetado de interacciones + slugs (#/ruta)
+     MAZE · Etiquetado de interacciones + slugs (?pantalla=ruta)
      ------------------------------------------------------------
      1) SLUGS: cada pantalla, popup, menú desplegable o drawer cambia
-        la URL (#/crear-solicitud/..., #/consultar-estado/...) y el
-        <title>, para que Maze lo registre como una pantalla/proceso
+        la URL (?pantalla=crear-solicitud/..., ?pantalla=consultar-estado/...)
+        y el <title>, para que Maze lo registre como una pantalla/proceso
         nuevo y genere su mapa de calor.
+        IMPORTANTE (documentación de Maze): "every screen needs its own URL"
+        y "Each link should load a new page with its own unique URL" (sitio
+        multipágina, no SPA). Por eso:
+          · PANTALLAS (MZ.screen) → carga real de página: location.assign()
+            a ?pantalla=<ruta>. El snippet de Maze se ejecuta en cada carga
+            y registra un paso nuevo + su propio mapa de calor.
+          · OVERLAYS (popups, menús, drawer) → solo replaceState, sin recarga,
+            para no perder lo diligenciado. Maze no captura overlays en los
+            mapas de calor ("only the base page/screen").
+          · El estado (tickets creados, filtros, borrador del formulario) se
+            guarda en sessionStorage al salir y se restaura al cargar.
+          · ?mazenav=spa desactiva la recarga (modo SPA con pushState).
+        Verificación: abre la página con ?mazedebug=1 para ver el panel
+        de diagnóstico (snippet cargado, URL actual, pantallas registradas).
           MZ.screen(path)  → pantalla nueva (cambia la "base")
           MZ.sub(suffix)   → overlay relativo a la base (popup, menú)
           MZ.overlay(path) → overlay con ruta absoluta (drawer)
@@ -37,9 +51,27 @@
     // Estado lógico del dashboard (lo leen los marcadores data-maze-* del <body>)
     const state = { form: "", variant: "" };
     let current = "";            // ruta lógica actual (pantalla + overlay)
-    let lastSet = location.hash; // último hash escrito por la app → distingue Atrás/Adelante del usuario
     let silent = false;          // true mientras se restaura una ruta desde el historial
     let navHandler = null;
+    let booted = false;          // hasta terminar la carga inicial, las pantallas no recargan
+    const NAV_MODE = new URLSearchParams(location.search).get("mazenav") === "spa" ? "spa" : "recarga";
+
+    /* ---------- URL: ?pantalla=<ruta> (conserva los demás parámetros, p. ej. los de Maze) ---------- */
+    const PARAM = "pantalla";
+    function readRoute() {
+      const q = new URLSearchParams(location.search).get(PARAM);
+      if (q) return q.replace(/^\/+|\/+$/g, "");
+      // Compatibilidad con enlaces antiguos #/ruta
+      return /^#\/./.test(location.hash) ? location.hash.replace(/^#\/?/, "") : "";
+    }
+    function buildUrl(path) {
+      const params = new URLSearchParams(location.search);
+      params.delete(PARAM);
+      const rest = params.toString();
+      // La barra "/" es válida en la query; se deja sin codificar para que la ruta sea legible en Maze
+      return location.pathname + "?" + PARAM + "=" + path.split("/").map(encodeURIComponent).join("/") + (rest ? "&" + rest : "");
+    }
+    function sameUrl(url) { return location.pathname + location.search === url && !location.hash; }
 
     /* ---------- Registro de interacciones (separado de la URL) ----------
        Cada evento lleva pantalla, overlay, etiqueta (#id / data-maze) y tipo.
@@ -81,11 +113,19 @@
       mark(title);
       track("screen", null, { to: path, via: silent ? "historial" : "ui" });
       if (silent) return;                     // restaurando: la URL ya es la correcta
-      const hash = "#/" + path;
-      if (location.hash === hash) return;
-      lastSet = hash;                         // marca el cambio como propio de la app
-      if (replace) location.replace(hash);    // cambia la URL sin ensuciar el historial
-      else location.hash = hash;              // nueva entrada → el botón Atrás vuelve aquí
+      const url = buildUrl(path);
+      if (sameUrl(url)) return;
+      if (!booted) replace = true;            // carga inicial: solo corrige la URL
+      window.dispatchEvent(new CustomEvent("maze:url", { detail: { path: path, url: url, replace: !!replace, mode: NAV_MODE } }));
+      if (!replace && NAV_MODE === "recarga") {
+        // Pantalla nueva = página nueva (lo que Maze necesita para registrar el paso).
+        // Si en el mismo clic se piden varias pantallas, gana la última.
+        location.assign(url);
+        return;
+      }
+      // replaceState → cambia la URL sin ensuciar el historial (overlays)
+      // pushState    → nueva entrada (solo en modo spa)
+      history[replace ? "replaceState" : "pushState"]({ mz: path }, "", url);
     }
 
     /* ---------- Etiquetador automático ---------- */
@@ -120,7 +160,7 @@
     }
 
     function tag(el, kind) {
-      if (el.dataset.maze) return;
+      if (el.dataset.maze || el.closest("[data-mz-ignore]")) return;
       const holder = el.closest("[data-mz-scope]");
       const scope = holder ? holder.dataset.mzScope : "app";
       const key = scope + "__" + kind + "__" + labelOf(el);
@@ -151,6 +191,7 @@
 
     return {
       slug,
+      readRoute,
       formPath: "crear-solicitud",
       run,
       state,
@@ -165,17 +206,18 @@
       beginRoute() { silent = true; },
       endRoute() {
         silent = false;
-        const h = "#/" + current;
-        lastSet = h;
-        if (current && location.hash !== h) location.replace(h);   // la URL refleja lo que realmente se muestra
+        if (!current) return;
+        const url = buildUrl(current);
+        if (!sameUrl(url)) history.replaceState({ mz: current }, "", url);   // la URL refleja lo que realmente se muestra
       },
       onNavigate(fn) { navHandler = fn; },
+      ready() { booted = true; },
+      navMode: NAV_MODE,
       init() {
-        window.addEventListener("hashchange", () => {
-          if (location.hash === lastSet) return;       // cambio hecho por la propia app
-          lastSet = location.hash;                     // el usuario usó Atrás/Adelante o editó la URL
-          if (navHandler) navHandler(location.hash.replace(/^#\/?/, ""));
-        });
+        // Atrás/Adelante del navegador (pushState no dispara popstate, así que solo llegan cambios del usuario)
+        window.addEventListener("popstate", () => { if (navHandler) navHandler(readRoute()); });
+        // Enlace antiguo con #/ruta editado a mano
+        window.addEventListener("hashchange", () => { if (/^#\/./.test(location.hash) && navHandler) navHandler(readRoute()); });
         run();
         let pending = false;
         new MutationObserver(() => {
@@ -214,11 +256,23 @@
         // Utilidad de consola: lista todas las etiquetas de la pantalla actual
         window.mazeTagMap = function () {
           return Array.from(document.querySelectorAll("[data-maze]")).map((e) => ({
-            id: e.id, tag: e.dataset.maze, type: e.dataset.mazeType, hover: !!e.dataset.mazeHover, slug: location.hash
+            id: e.id, tag: e.dataset.maze, type: e.dataset.mazeType, hover: !!e.dataset.mazeHover, slug: readRoute()
           }));
         };
       }
     };
+  })();
+
+  /* ---------- Persistencia entre cargas de página (cada pantalla recarga) ---------- */
+  const store = {
+    get(k) { try { return JSON.parse(sessionStorage.getItem("breb:" + k)); } catch (e) { return null; } },
+    set(k, v) { try { sessionStorage.setItem("breb:" + k, JSON.stringify(v)); } catch (e) {} },
+    clear(k) { try { sessionStorage.removeItem("breb:" + k); } catch (e) {} }
+  };
+  // Tickets (incluye los creados en la sesión)
+  (function restoreTickets() {
+    const saved = store.get("tickets");
+    if (Array.isArray(saved) && saved.length) TICKETS.splice(0, TICKETS.length, ...saved);
   })();
 
   /* ---------- Estado ---------- */
@@ -1137,6 +1191,10 @@
     page: 1,
     pageSize: 10
   };
+  (function restoreConsulta() {
+    const saved = store.get("consulta");
+    if (saved && typeof saved === "object") Object.assign(consultaState, saved);
+  })();
 
   const ANS_CLASS = { "A tiempo": "ok", "Por vencer": "warn", "Vencido": "bad" };
   const EST_CLASS = { "En proceso": "progress", "Resuelto": "done" };
@@ -1724,10 +1782,12 @@
     noResults.hidden = !q || anyVisible;
 
     // Maze: estados del buscador (vacío / con resultados / sin resultados)
+    // Se filtra en cada tecla: la URL cambia sin recargar (recargar borraría lo escrito)
     if (!activeOptionId) {
-      if (!q) MZ.screen("crear-solicitud", "Crear solicitud");
-      else if (anyVisible) MZ.screen("crear-solicitud/busqueda/con-resultados", "Búsqueda con resultados");
-      else MZ.screen("crear-solicitud/busqueda/sin-resultados", "Búsqueda sin resultados");
+      const soft = { replace: true };
+      if (!q) MZ.screen("crear-solicitud", "Crear solicitud", soft);
+      else if (anyVisible) MZ.screen("crear-solicitud/busqueda/con-resultados", "Búsqueda con resultados", soft);
+      else MZ.screen("crear-solicitud/busqueda/sin-resultados", "Búsqueda sin resultados", soft);
     }
   }
 
@@ -1758,7 +1818,7 @@
   });
 
   /* ============================================================
-     NAVEGACIÓN POR HISTORIAL (botón Atrás / Adelante / enlaces #/slug)
+     NAVEGACIÓN POR HISTORIAL (botón Atrás / Adelante / enlaces ?pantalla=slug)
      Restaura la pantalla, el formulario y su variante a partir del slug.
      Se ejecuta en modo "silencioso": la UI cambia sin reescribir la URL
      y, al final, la URL se reconcilia con lo que realmente se muestra.
@@ -1862,10 +1922,106 @@
   // Maze: etiquetado automático + historial del navegador
   MZ.init();
   MZ.onNavigate(applyRoute);
-  if (/^#\/./.test(location.hash)) {
-    // Enlace directo a una pantalla (#/consultar-estado, #/crear-solicitud/...)
-    applyRoute(location.hash.replace(/^#\/?/, ""));
+  const initialRoute = MZ.readRoute();
+  if (initialRoute) {
+    // Enlace directo a una pantalla (?pantalla=consultar-estado, ?pantalla=crear-solicitud/...)
+    applyRoute(initialRoute);
   } else {
     MZ.screen("crear-solicitud/categoria/" + MZ.slug(activeCategoryId || ""), "Crear solicitud", { replace: true });
   }
+  restoreDraft();
+  MZ.ready();
+
+  /* ---------- Borrador del formulario ----------
+     Al pasar de pantalla (p. ej. elegir Unitaria/Masiva) la página se recarga;
+     lo ya escrito se guarda y se vuelve a poner si se regresa al mismo formulario.
+     Los archivos adjuntos no se pueden conservar entre cargas (limitación del navegador). */
+  function collectDraft() {
+    if (!activeOptionId) return null;
+    const values = {};
+    $$("input, select, textarea", detailBody).forEach((el) => {
+      if (!el.id || el.type === "file") return;
+      values[el.id] = (el.type === "checkbox" || el.type === "radio") ? el.checked : el.value;
+    });
+    return { opt: activeOptionId, values };
+  }
+  function restoreDraft() {
+    const d = store.get("draft");
+    if (!d || d.opt !== activeOptionId || !d.values) return;
+    Object.keys(d.values).forEach((id) => {
+      if (id === "f-novedad") return;              // la variante la decide la URL
+      const el = document.getElementById(id);
+      if (!el || !detailBody.contains(el)) return;
+      if (el.type === "checkbox" || el.type === "radio") el.checked = !!d.values[id];
+      else el.value = d.values[id];
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+  // Se guarda en el instante en que la app pide la pantalla nueva (antes de que el
+  // código siguiente redibuje el formulario) y, como respaldo, al salir de la página
+  // (Atrás del navegador, cerrar pestaña).
+  let savedForNav = false;
+  function saveState() {
+    store.set("tickets", TICKETS);
+    store.set("consulta", { query: consultaState.query, filters: consultaState.filters, page: consultaState.page, pageSize: consultaState.pageSize });
+    const d = collectDraft();
+    if (d) store.set("draft", d); else store.clear("draft");
+  }
+  window.addEventListener("maze:url", (e) => {
+    if (e.detail.replace || MZ.navMode !== "recarga") return;
+    saveState();
+    savedForNav = true;
+  });
+  window.addEventListener("pagehide", () => {
+    if (savedForNav) { store.set("tickets", TICKETS); return; }
+    saveState();
+  });
+
+  /* ============================================================
+     MAZE · Panel de diagnóstico (solo con ?mazedebug=1 en la URL)
+     Muestra si el snippet de Maze cargó, la URL actual y cada
+     cambio de URL que Maze debería registrar como paso nuevo.
+     No se etiqueta (data-mz-ignore) ni aparece a los participantes.
+     ============================================================ */
+  (function mazeDebug() {
+    if (new URLSearchParams(location.search).get("mazedebug") !== "1") return;
+    const box = document.createElement("div");
+    box.setAttribute("data-mz-ignore", "");
+    box.style.cssText = "position:fixed;left:12px;bottom:12px;z-index:99999;width:min(420px,calc(100vw - 24px));max-height:45vh;overflow:auto;" +
+      "background:#111;color:#eee;font:12px/1.4 ui-monospace,Consolas,monospace;border-radius:10px;padding:10px 12px;box-shadow:0 6px 24px rgba(0,0,0,.35)";
+    document.body.appendChild(box);
+    let steps = [];
+    try { steps = JSON.parse(sessionStorage.getItem("breb:mazeSteps")) || []; } catch (e) {}
+    const saveSteps = () => { try { sessionStorage.setItem("breb:mazeSteps", JSON.stringify(steps.slice(-40))); } catch (e) {} };
+    function snippetStatus() {
+      const res = performance.getEntriesByType("resource").filter((e) => /maze\.co/.test(e.name));
+      const loader = res.some((e) => /maze-universal-loader/.test(e.name));
+      if (!loader && performance.now() < 10000) return { ok: null, txt: "Esperando el loader de Maze…" };
+      if (!loader) return { ok: false, txt: "NO cargó el loader de Maze (¿bloqueador de anuncios? ¿sin internet?)" };
+      return { ok: true, txt: "Loader cargado · " + res.length + " recurso(s) de maze.co" };
+    }
+    function esc(t) { return String(t).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]); }
+    function render() {
+      const st = snippetStatus();
+      box.innerHTML =
+        "<b>Maze debug</b><br>" +
+        "<span style='color:" + (st.ok ? "#5fd38d" : st.ok === null ? "#f5c26b" : "#ff6b6b") + "'>● " + esc(st.txt) + "</span><br>" +
+        "URL: <span style='color:#9cd2ff'>" + esc(location.pathname + location.search) + "</span><br>" +
+        "Modo: <b>" + MZ.navMode + "</b> · Cargas de página registradas: " + steps.filter((x) => x.load).length +
+        " <button id='mzDbgClear' style='margin-left:6px;font:inherit;background:#333;color:#eee;border:0;border-radius:4px;padding:1px 6px;cursor:pointer'>limpiar</button>" +
+        "<ol style='margin:6px 0 0 18px;padding:0'>" +
+        steps.slice(-12).map((x) => "<li>" + (x.load ? "<b style='color:#5fd38d'>[página]</b> " : "<i style='color:#aaa'>[overlay]</i> ") + esc(x.path) + "</li>").join("") + "</ol>";
+      const clr = box.querySelector("#mzDbgClear");
+      if (clr) clr.onclick = () => { steps = []; saveSteps(); render(); };
+    }
+    steps.push({ path: MZ.readRoute() || "(inicio)", load: true });
+    saveSteps();
+    window.addEventListener("maze:url", (e) => {
+      if (e.detail.replace) { steps.push({ path: e.detail.path, load: false }); saveSteps(); render(); }
+    });
+    render();
+    // El snippet carga async: revisa cada segundo hasta confirmarlo (máx. 11 s)
+    const poll = setInterval(() => { render(); if (snippetStatus().ok !== null) clearInterval(poll); }, 1000);
+    setTimeout(() => clearInterval(poll), 11000);
+  })();
 })();

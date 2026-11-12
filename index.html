@@ -1,7 +1,14 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <!-- Maze snippet -->
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Maze snippet
+       Va UNA sola vez, aquí en el <head>. El sitio tiene un único HTML (index.html)
+       y cada pantalla es una carga nueva de esta misma página con su propia URL
+       (?pantalla=...), así que el snippet se ejecuta en todas las pantallas.
+       Si se agregan más archivos .html, cada uno debe llevar este mismo bloque. -->
   <script>
   (function (m, a, z, e) {
     var s, t, u, v;
@@ -32,8 +39,6 @@
   </script>
   <!-- / Maze snippet -->
 
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Credibanco · Centro de Solución Bre-B</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -48,7 +53,10 @@
       data-maze-view     → crear | consultar
       data-maze-form     → id de la subcategoría con formulario abierto
       data-maze-variant  → unitaria | masiva
-    Cada cambio también actualiza la URL (#/slug) y el <title>.
+    Cada cambio también actualiza la URL (?pantalla=slug) y el <title>.
+    Pantalla nueva = carga real de página (Maze registra paso + mapa de calor);
+    popups/menús/drawer solo cambian la URL sin recargar.
+    Diagnóstico: agrega ?mazedebug=1 a la URL.
   -->
   <!-- ===================== HEADER ===================== -->
   <header class="app-header" data-mz-scope="header">
